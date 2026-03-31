@@ -1,0 +1,41 @@
+{
+  "name": "SunCo Ticket Creator",
+  "author": {
+    "name": "Tyler Carty",
+    "email": "tyler@example.com",
+    "url": "https://example.com"
+  },
+  "defaultLocale": "en",
+  "private": true,
+  "location": {
+    "support": {
+      "ticket_sidebar": {
+        "url": "assets/iframe.html",
+        "autoLoad": true,
+        "flexible": true
+      }
+    }
+  },
+  "version": "1.0.0",
+  "frameworkVersion": "2.0",
+  "parameters": [
+    {
+      "name": "suncoAppId",
+      "type": "text",
+      "required": true,
+      "secure": false
+    },
+    {
+      "name": "suncoKeyId",
+      "type": "text",
+      "required": true,
+      "secure": false
+    },
+    {
+      "name": "suncoKeySecret",
+      "type": "text",
+      "required": true,
+      "secure": false
+    }
+  ]
+}

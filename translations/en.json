@@ -1,0 +1,20 @@
+{
+  "app": {
+    "name": "SunCo Ticket Creator",
+    "short_description": "Create SunCo-linked tickets from the sidebar",
+    "long_description": "Allows agents to manually create new Zendesk tickets linked to Sunshine Conversations, enabling in-app messaging with end users.",
+    "installation_instructions": "Enter your Sunshine Conversations App ID, Key ID, and Key Secret."
+  },
+  "suncoAppId": {
+    "label": "SunCo App ID",
+    "helpText": "Your Sunshine Conversations App ID"
+  },
+  "suncoKeyId": {
+    "label": "SunCo Key ID",
+    "helpText": "Your Sunshine Conversations API Key ID"
+  },
+  "suncoKeySecret": {
+    "label": "SunCo Key Secret",
+    "helpText": "Your Sunshine Conversations API Key Secret"
+  }
+}

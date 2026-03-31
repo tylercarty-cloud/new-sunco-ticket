@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/combine/npm/@zendeskgarden/css-bedrock@2.0.5,npm/@zendeskgarden/css-utilities@4.3.0">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 13px;
+      color: #2f3941;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .app-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #d8dcde;
+    }
+
+    .app-header svg {
+      width: 20px;
+      height: 20px;
+      fill: #1f73b7;
+      flex-shrink: 0;
+    }
+
+    .app-header h2 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #2f3941;
+    }
+
+    .info-card {
+      background: #edf7ff;
+      border: 1px solid #adcce4;
+      border-radius: 4px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+    }
+
+    .info-card .label {
+      font-size: 11px;
+      font-weight: 600;
+      color: #49545c;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 2px;
+    }
+
+    .info-card .value {
+      font-size: 13px;
+      color: #2f3941;
+      word-break: break-all;
+    }
+
+    .info-card .value.missing {
+      color: #cc3340;
+      font-style: italic;
+    }
+
+    .form-group {
+      margin-bottom: 10px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #2f3941;
+      margin-bottom: 4px;
+    }
+
+    .form-group input,
+    .form-group textarea,
+    .form-group select {
+      width: 100%;
+      padding: 6px 8px;
+      font-size: 13px;
+      border: 1px solid #d8dcde;
+      border-radius: 4px;
+      color: #2f3941;
+      background: #fff;
+      transition: border-color 0.15s;
+    }
+
+    .form-group input:focus,
+    .form-group textarea:focus,
+    .form-group select:focus {
+      outline: none;
+      border-color: #1f73b7;
+      box-shadow: 0 0 0 3px rgba(31, 115, 183, 0.15);
+    }
+
+    .form-group textarea {
+      min-height: 60px;
+      resize: vertical;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.15s, opacity 0.15s;
+    }
+
+    .btn-primary {
+      background: #1f73b7;
+      color: #fff;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: #144a75;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      margin-right: 8px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .status-bar {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.4;
+      display: none;
+    }
+
+    .status-bar.success {
+      display: block;
+      background: #edf8f4;
+      border: 1px solid #87d6b5;
+      color: #186146;
+    }
+
+    .status-bar.error {
+      display: block;
+      background: #fff0f1;
+      border: 1px solid #e9aaae;
+      color: #8c232c;
+    }
+
+    .status-bar.info {
+      display: block;
+      background: #edf7ff;
+      border: 1px solid #adcce4;
+      color: #1f73b7;
+    }
+
+    .status-bar a {
+      color: inherit;
+      font-weight: 600;
+    }
+
+    .progress-steps {
+      margin-top: 10px;
+      display: none;
+    }
+
+    .progress-steps.visible {
+      display: block;
+    }
+
+    .step {
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+      padding: 4px 0;
+      font-size: 11px;
+      color: #68737d;
+    }
+
+    .step .step-icon {
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+
+    .step.active {
+      color: #1f73b7;
+      font-weight: 600;
+    }
+
+    .step.done {
+      color: #038153;
+    }
+
+    .step.failed {
+      color: #cc3340;
+    }
+
+    .step .step-icon.pending { fill: #d8dcde; }
+    .step .step-icon.active { fill: #1f73b7; }
+    .step .step-icon.done { fill: #038153; }
+    .step .step-icon.failed { fill: #cc3340; }
+
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="app-header">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M14 1H2a1 1 0 00-1 1v9a1 1 0 001 1h3l3 3 3-3h3a1 1 0 001-1V2a1 1 0 00-1-1zM5 7a1 1 0 110-2 1 1 0 010 2zm3 0a1 1 0 110-2 1 1 0 010 2zm3 0a1 1 0 110-2 1 1 0 010 2z"/></svg>
+    <h2>SunCo Ticket Creator</h2>
+  </div>
+
+  <div id="requesterInfo" class="info-card">
+    <div class="label">Current Requester</div>
+    <div class="value" id="requesterDisplay">Loading...</div>
+  </div>
+
+  <div id="externalIdInfo" class="info-card">
+    <div class="label">External ID (SunCo User ID)</div>
+    <div class="value" id="externalIdDisplay">Loading...</div>
+  </div>
+
+  <form id="ticketForm">
+    <div class="form-group">
+      <label for="ticketSubject">Ticket Subject</label>
+      <input type="text" id="ticketSubject" placeholder="Enter ticket subject..." required>
+    </div>
+
+    <div class="form-group">
+      <label for="ticketTitle">Ticket Title</label>
+      <input type="text" id="ticketTitle" placeholder="Enter ticket title...">
+    </div>
+
+    <div class="form-group">
+      <label for="requestType">Request Type</label>
+      <select id="requestType">
+        <option value="">Loading options...</option>
+      </select>
+    </div>
+
+    <div class="form-group">
+      <label for="ticketMessage">User Message (sent on behalf of user)</label>
+      <textarea id="ticketMessage" placeholder="Enter the message that will appear as from the user..." required></textarea>
+    </div>
+
+    <button type="submit" id="createBtn" class="btn btn-primary" disabled>
+      Create SunCo Ticket
+    </button>
+  </form>
+
+  <div id="progressSteps" class="progress-steps">
+    <div class="step" id="step1">
+      <svg class="step-icon pending" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>
+      <span>Creating SunCo conversation...</span>
+    </div>
+    <div class="step" id="step2">
+      <svg class="step-icon pending" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>
+      <span>Sending user message to trigger ticket...</span>
+    </div>
+    <div class="step" id="step3">
+      <svg class="step-icon pending" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>
+      <span>Waiting for ticket creation...</span>
+    </div>
+    <div class="step" id="step4">
+      <svg class="step-icon pending" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg>
+      <span>Setting requester, subject, and custom fields...</span>
+    </div>
+  </div>
+
+  <div id="statusBar" class="status-bar"></div>
+
+  <script src="https://static.zdassets.com/zendesk_app_framework_sdk/2.0/zaf_sdk.min.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
