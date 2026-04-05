@@ -20,6 +20,8 @@
     suncoKeySecret: null,
     originalCustomFields: [],
     originalTicketId: null,
+    agentWorkspaceIntegrationName: null,
+    switchboardId: null,
     isReady: false
   };
 
@@ -82,9 +84,51 @@
         suncoKeyId: state.suncoKeyId ? '(set)' : '(NOT SET)',
         suncoKeySecret: state.suncoKeySecret ? '(set)' : '(NOT SET)'
       });
+      discoverSwitchboard();
     }).catch(function (err) {
       logError('Failed to load settings', err);
     });
+  }
+
+  function discoverSwitchboard() {
+    if (!state.suncoAppId) {
+      log('Skipping switchboard discovery: no app ID');
+      return;
+    }
+
+    var path = '/v2/apps/' + state.suncoAppId + '/switchboards';
+    makeSunCoRequest(path, null, 'GET')
+      .then(function (response) {
+        var data = (typeof response === 'string') ? JSON.parse(response) : response;
+        var switchboards = data.switchboards || [];
+        if (switchboards.length === 0) {
+          log('No switchboards found');
+          return;
+        }
+
+        state.switchboardId = switchboards[0].id;
+        log('Switchboard discovered:', state.switchboardId);
+
+        var intPath = '/v2/apps/' + state.suncoAppId + '/switchboards/' + state.switchboardId + '/switchboardIntegrations';
+        return makeSunCoRequest(intPath, null, 'GET');
+      })
+      .then(function (response) {
+        if (!response) return;
+        var data = (typeof response === 'string') ? JSON.parse(response) : response;
+        var integrations = data.switchboardIntegrations || [];
+
+        for (var i = 0; i < integrations.length; i++) {
+          if (integrations[i].integrationType === 'zd:agentWorkspace') {
+            state.agentWorkspaceIntegrationName = integrations[i].name;
+            log('Agent Workspace integration found:', state.agentWorkspaceIntegrationName);
+            return;
+          }
+        }
+        log('Agent Workspace integration not found in switchboard');
+      })
+      .catch(function (err) {
+        logError('Switchboard discovery failed (non-fatal)', err);
+      });
   }
 
   function loadRequesterInfo() {
@@ -222,26 +266,33 @@
           log('Step 1 complete. Conversation ID:', conversationId);
           setStepState(1, 'done');
           setStepState(2, 'active');
-          log('Step 2: Sending user message to trigger ticket creation');
+          log('Step 2: Passing control to Agent Workspace with tags');
+          return passControlWithTags(conversationId);
+        })
+        .then(function () {
+          log('Step 2 complete. Control passed with tags.');
+          setStepState(2, 'done');
+          setStepState(3, 'active');
+          log('Step 3: Sending user message to trigger ticket creation');
           return sendSunCoMessage(conversationId, message, 'user');
         })
         .then(function () {
-          log('Step 2 complete. User message sent.');
-          setStepState(2, 'done');
-          setStepState(3, 'active');
-          log('Step 3: Polling for ticket creation by SunCo integration');
+          log('Step 3 complete. User message sent.');
+          setStepState(3, 'done');
+          setStepState(4, 'active');
+          log('Step 4: Polling for ticket creation by SunCo integration');
           return pollForTicket(conversationId, workflowStartedAt);
         })
         .then(function (ticketId) {
-          log('Step 3 complete. Ticket ID:', ticketId);
-          setStepState(3, 'done');
+          log('Step 4 complete. Ticket ID:', ticketId);
+          setStepState(4, 'done');
 
           if (ticketId) {
-            setStepState(4, 'active');
-            log('Step 4: Updating ticket with requester, subject, custom fields, tags, and conversation ID');
+            setStepState(5, 'active');
+            log('Step 5: Updating ticket with requester, subject, custom fields, and conversation ID');
             return updateTicket(ticketId, subject, ticketTitleVal, requestTypeVal, conversationId).then(function () {
-              log('Step 4 complete.');
-              setStepState(4, 'done');
+              log('Step 5 complete.');
+              setStepState(5, 'done');
               return ticketId;
             });
           }
@@ -344,6 +395,26 @@
     return makeSunCoRequest(path, {
       author: author,
       content: { type: 'text', text: messageText }
+    });
+  }
+
+  function passControlWithTags(conversationId) {
+    if (!state.agentWorkspaceIntegrationName) {
+      log('Switchboard not available, skipping passControl');
+      return Promise.resolve();
+    }
+
+    var path = '/v2/apps/' + state.suncoAppId + '/conversations/' + conversationId + '/passControl';
+    var metadata = {};
+    metadata['dataCapture.systemField.tags'] = AUTO_TAGS.join(',');
+    log('Passing control to Agent Workspace with tags:', AUTO_TAGS);
+
+    return makeSunCoRequest(path, {
+      switchboardIntegration: state.agentWorkspaceIntegrationName,
+      metadata: metadata
+    }).then(function (response) {
+      log('passControl succeeded', response);
+      return response;
     });
   }
 
@@ -557,7 +628,7 @@
   }
 
   function getCurrentActiveStep() {
-    for (var i = 1; i <= 4; i++) {
+    for (var i = 1; i <= 5; i++) {
       var step = document.getElementById('step' + i);
       if (step && step.getAttribute('class').indexOf('active') !== -1) return i;
     }
@@ -570,6 +641,7 @@
     setStepState(2, 'pending');
     setStepState(3, 'pending');
     setStepState(4, 'pending');
+    setStepState(5, 'pending');
     resizeApp();
   }
 
