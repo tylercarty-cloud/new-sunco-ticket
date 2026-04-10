@@ -7,9 +7,6 @@
   var REQUEST_TYPE_FIELD_ID = '42571762576276';
   var AUTO_TAGS = ['mccomplete', 'manual_ticket'];
   var REQUEST_TIMEOUT_MS = 30000;
-  var TICKET_POLL_INTERVAL_MS = 3000;
-  var TICKET_POLL_MAX_ATTEMPTS = 20;
-  var TICKET_POLL_INITIAL_DELAY_MS = 5000;
 
   var state = {
     requesterName: null,
@@ -20,8 +17,6 @@
     suncoKeySecret: null,
     originalCustomFields: [],
     originalTicketId: null,
-    agentWorkspaceIntegrationName: null,
-    switchboardId: null,
     isReady: false
   };
 
@@ -84,51 +79,9 @@
         suncoKeyId: state.suncoKeyId ? '(set)' : '(NOT SET)',
         suncoKeySecret: state.suncoKeySecret ? '(set)' : '(NOT SET)'
       });
-      discoverSwitchboard();
     }).catch(function (err) {
       logError('Failed to load settings', err);
     });
-  }
-
-  function discoverSwitchboard() {
-    if (!state.suncoAppId) {
-      log('Skipping switchboard discovery: no app ID');
-      return;
-    }
-
-    var path = '/v2/apps/' + state.suncoAppId + '/switchboards';
-    makeSunCoRequest(path, null, 'GET')
-      .then(function (response) {
-        var data = (typeof response === 'string') ? JSON.parse(response) : response;
-        var switchboards = data.switchboards || [];
-        if (switchboards.length === 0) {
-          log('No switchboards found');
-          return;
-        }
-
-        state.switchboardId = switchboards[0].id;
-        log('Switchboard discovered:', state.switchboardId);
-
-        var intPath = '/v2/apps/' + state.suncoAppId + '/switchboards/' + state.switchboardId + '/switchboardIntegrations';
-        return makeSunCoRequest(intPath, null, 'GET');
-      })
-      .then(function (response) {
-        if (!response) return;
-        var data = (typeof response === 'string') ? JSON.parse(response) : response;
-        var integrations = data.switchboardIntegrations || [];
-
-        for (var i = 0; i < integrations.length; i++) {
-          if (integrations[i].integrationType === 'zd:agentWorkspace') {
-            state.agentWorkspaceIntegrationName = integrations[i].name;
-            log('Agent Workspace integration found:', state.agentWorkspaceIntegrationName);
-            return;
-          }
-        }
-        log('Agent Workspace integration not found in switchboard');
-      })
-      .catch(function (err) {
-        logError('Switchboard discovery failed (non-fatal)', err);
-      });
   }
 
   function loadRequesterInfo() {
@@ -246,6 +199,11 @@
   });
 
   // ── Main workflow ──
+  //
+  // Ticket-first approach: create the Zendesk ticket via the Tickets API so
+  // that tags (mccomplete, manual_ticket) are present from the very first
+  // trigger evaluation.  Then create the SunCo conversation, send the user
+  // message, and link the conversation back to the ticket.
 
   function createSunCoTicket(subject, message, ticketTitleVal, requestTypeVal) {
     try {
@@ -253,69 +211,50 @@
       showProgress();
       hideStatus();
 
+      var newTicketId;
       var conversationId;
-      var workflowStartedAt = new Date().toISOString();
 
-      log('Step 1: Creating SunCo conversation for externalId:', state.requesterExternalId);
-      log('Workflow started at:', workflowStartedAt);
+      log('Step 1: Creating Zendesk ticket with tags');
       setStepState(1, 'active');
 
-      createSunCoConversation(state.requesterExternalId)
-        .then(function (convId) {
-          conversationId = convId;
-          log('Step 1 complete. Conversation ID:', conversationId);
+      createZendeskTicket(subject, message, ticketTitleVal, requestTypeVal)
+        .then(function (ticketId) {
+          newTicketId = ticketId;
+          log('Step 1 complete. Ticket #' + newTicketId + ' created with tags:', AUTO_TAGS);
           setStepState(1, 'done');
           setStepState(2, 'active');
-          log('Step 2: Passing control to Agent Workspace with tags');
-          return passControlWithTags(conversationId);
+          log('Step 2: Creating SunCo conversation for externalId:', state.requesterExternalId);
+          return createSunCoConversation(state.requesterExternalId);
         })
-        .then(function () {
-          log('Step 2 complete. Control passed with tags.');
+        .then(function (convId) {
+          conversationId = convId;
+          log('Step 2 complete. Conversation ID:', conversationId);
           setStepState(2, 'done');
           setStepState(3, 'active');
-          log('Step 3: Sending user message to trigger ticket creation');
+          log('Step 3: Sending user message on conversation');
           return sendSunCoMessage(conversationId, message, 'user');
         })
         .then(function () {
           log('Step 3 complete. User message sent.');
           setStepState(3, 'done');
           setStepState(4, 'active');
-          log('Step 4: Polling for ticket creation by SunCo integration');
-          return pollForTicket(conversationId, workflowStartedAt);
+          log('Step 4: Linking SunCo conversation to ticket #' + newTicketId);
+          return linkConversationToTicket(newTicketId, conversationId);
         })
-        .then(function (ticketId) {
-          log('Step 4 complete. Ticket ID:', ticketId);
+        .then(function () {
+          log('Step 4 complete. Conversation linked.');
           setStepState(4, 'done');
 
-          if (ticketId) {
-            setStepState(5, 'active');
-            log('Step 5: Updating ticket with requester, subject, custom fields, and conversation ID');
-            return updateTicket(ticketId, subject, ticketTitleVal, requestTypeVal, conversationId).then(function () {
-              log('Step 5 complete.');
-              setStepState(5, 'done');
-              return ticketId;
+          showStatus(
+            'success',
+            'Ticket <a href="#" id="openTicketLink">#' + newTicketId + '</a> created with tags and linked to Sunshine Conversation.'
+          );
+          var link = document.getElementById('openTicketLink');
+          if (link) {
+            link.addEventListener('click', function (ev) {
+              ev.preventDefault();
+              client.invoke('routeTo', 'ticket', newTicketId);
             });
-          }
-          return ticketId;
-        })
-        .then(function (ticketId) {
-          if (ticketId) {
-            showStatus(
-              'success',
-              'Ticket <a href="#" id="openTicketLink">#' + ticketId + '</a> created via Sunshine Conversations.'
-            );
-            var link = document.getElementById('openTicketLink');
-            if (link) {
-              link.addEventListener('click', function (ev) {
-                ev.preventDefault();
-                client.invoke('routeTo', 'ticket', ticketId);
-              });
-            }
-          } else {
-            showStatus(
-              'success',
-              'Conversation created and message sent. The ticket should appear shortly in your queue.'
-            );
           }
 
           ticketSubject.value = '';
@@ -336,6 +275,92 @@
       showStatus('error', 'JavaScript error: ' + syncError.message);
       setFormEnabled(true);
     }
+  }
+
+  // ── Zendesk API ──
+
+  function createZendeskTicket(subject, message, ticketTitleVal, requestTypeVal) {
+    var customFields = buildCustomFields(ticketTitleVal, requestTypeVal, null);
+
+    var ticketData = {
+      ticket: {
+        requester_id: state.requesterId,
+        subject: subject,
+        tags: AUTO_TAGS,
+        comment: { body: message, public: true },
+        custom_fields: customFields
+      }
+    };
+
+    log('Creating ticket with payload:', JSON.stringify(ticketData, null, 2));
+
+    return client.request({
+      url: '/api/v2/tickets.json',
+      type: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify(ticketData)
+    }).then(function (response) {
+      var data = (typeof response === 'string') ? JSON.parse(response) : response;
+      if (data.ticket && data.ticket.id) {
+        log('Ticket created: #' + data.ticket.id);
+        return data.ticket.id;
+      }
+      throw new Error('No ticket ID in response: ' + JSON.stringify(data));
+    }).catch(function (err) {
+      logError('Failed to create ticket', err);
+      throw err;
+    });
+  }
+
+  function linkConversationToTicket(ticketId, conversationId) {
+    var updateData = {
+      ticket: {
+        custom_fields: [
+          { id: Number(SUNCO_CONVERSATION_FIELD_ID), value: conversationId }
+        ]
+      }
+    };
+
+    log('Linking conversation ' + conversationId + ' to ticket #' + ticketId);
+
+    return client.request({
+      url: '/api/v2/tickets/' + ticketId + '.json',
+      type: 'PUT',
+      contentType: 'application/json',
+      data: JSON.stringify(updateData)
+    }).then(function (response) {
+      log('Conversation linked to ticket', response);
+      return response;
+    }).catch(function (err) {
+      logError('Failed to link conversation to ticket', err);
+      throw err;
+    });
+  }
+
+  function buildCustomFields(ticketTitleVal, requestTypeVal, conversationId) {
+    var fieldsMap = {};
+
+    state.originalCustomFields.forEach(function (f) {
+      fieldsMap[String(f.id)] = f.value;
+    });
+
+    if (ticketTitleVal) {
+      fieldsMap[TICKET_TITLE_FIELD_ID] = ticketTitleVal;
+    }
+    if (requestTypeVal) {
+      fieldsMap[REQUEST_TYPE_FIELD_ID] = requestTypeVal;
+    }
+    if (conversationId) {
+      fieldsMap[SUNCO_CONVERSATION_FIELD_ID] = conversationId;
+    }
+
+    var result = [];
+    Object.keys(fieldsMap).forEach(function (id) {
+      result.push({ id: Number(id), value: fieldsMap[id] });
+    });
+
+    log('Built custom fields (' + result.length + ' fields)', JSON.stringify(result, null, 2));
+    return result;
   }
 
   // ── SunCo API ──
@@ -395,168 +420,6 @@
     return makeSunCoRequest(path, {
       author: author,
       content: { type: 'text', text: messageText }
-    });
-  }
-
-  function passControlWithTags(conversationId) {
-    if (!state.agentWorkspaceIntegrationName) {
-      log('Switchboard not available, skipping passControl');
-      return Promise.resolve();
-    }
-
-    var path = '/v2/apps/' + state.suncoAppId + '/conversations/' + conversationId + '/passControl';
-    var metadata = {};
-    metadata['dataCapture.systemField.tags'] = AUTO_TAGS.join(',');
-    log('Passing control to Agent Workspace with tags:', AUTO_TAGS);
-
-    return makeSunCoRequest(path, {
-      switchboardIntegration: state.agentWorkspaceIntegrationName,
-      metadata: metadata
-    }).then(function (response) {
-      log('passControl succeeded', response);
-      return response;
-    });
-  }
-
-  // ── Zendesk API ──
-
-  function updateTicket(ticketId, subject, ticketTitleVal, requestTypeVal, conversationId) {
-    var customFields = buildCustomFields(ticketTitleVal, requestTypeVal, conversationId);
-
-    var updateData = {
-      ticket: {
-        requester_id: state.requesterId,
-        subject: subject,
-        tags: AUTO_TAGS,
-        custom_fields: customFields
-      }
-    };
-
-    log('Updating ticket #' + ticketId + ' with payload:', JSON.stringify(updateData, null, 2));
-
-    return client.request({
-      url: '/api/v2/tickets/' + ticketId + '.json',
-      type: 'PUT',
-      contentType: 'application/json',
-      data: JSON.stringify(updateData)
-    }).then(function (response) {
-      log('Ticket updated successfully', response);
-      return response;
-    }).catch(function (err) {
-      logError('Failed to update ticket', err);
-      throw err;
-    });
-  }
-
-  function buildCustomFields(ticketTitleVal, requestTypeVal, conversationId) {
-    var fieldsMap = {};
-
-    state.originalCustomFields.forEach(function (f) {
-      fieldsMap[String(f.id)] = f.value;
-    });
-
-    if (ticketTitleVal) {
-      fieldsMap[TICKET_TITLE_FIELD_ID] = ticketTitleVal;
-    }
-    if (requestTypeVal) {
-      fieldsMap[REQUEST_TYPE_FIELD_ID] = requestTypeVal;
-    }
-    if (conversationId) {
-      fieldsMap[SUNCO_CONVERSATION_FIELD_ID] = conversationId;
-    }
-
-    var result = [];
-    Object.keys(fieldsMap).forEach(function (id) {
-      result.push({ id: Number(id), value: fieldsMap[id] });
-    });
-
-    log('Built custom fields for new ticket (' + result.length + ' fields)', JSON.stringify(result, null, 2));
-    return result;
-  }
-
-  // ── Polling ──
-
-  function pollForTicket(conversationId, startedAt) {
-    log('Polling for newest ticket by requester ' + state.requesterId + ' created after ' + startedAt);
-    var attempts = 0;
-
-    return new Promise(function (resolve, reject) {
-      function checkForTicket() {
-        attempts++;
-        log('Poll attempt ' + attempts + ' of ' + TICKET_POLL_MAX_ATTEMPTS);
-
-        findNewestTicket(startedAt)
-          .then(function (ticketId) {
-            if (ticketId) {
-              log('Found new ticket #' + ticketId);
-              resolve(ticketId);
-            } else if (attempts >= TICKET_POLL_MAX_ATTEMPTS) {
-              log('Max poll attempts reached, no new ticket found');
-              resolve(null);
-            } else {
-              setTimeout(checkForTicket, TICKET_POLL_INTERVAL_MS);
-            }
-          })
-          .catch(function (err) {
-            logError('Error polling for ticket', err);
-            if (attempts >= TICKET_POLL_MAX_ATTEMPTS) {
-              resolve(null);
-            } else {
-              setTimeout(checkForTicket, TICKET_POLL_INTERVAL_MS);
-            }
-          });
-      }
-
-      setTimeout(checkForTicket, TICKET_POLL_INITIAL_DELAY_MS);
-    });
-  }
-
-  function findNewestTicket(startedAt) {
-    var cacheBust = '_=' + Date.now();
-
-    var viaList = client.request({
-      url: '/api/v2/users/' + state.requesterId + '/tickets/requested.json?sort_by=created_at&sort_order=desc&per_page=5&' + cacheBust,
-      type: 'GET'
-    }).then(function (response) {
-      var data = (typeof response === 'string') ? JSON.parse(response) : response;
-      var tickets = data.tickets || [];
-      log('[List] Returned ' + tickets.length + ' ticket(s)');
-      for (var i = 0; i < tickets.length; i++) {
-        var t = tickets[i];
-        log('[List] #' + t.id + ' created ' + t.created_at);
-        if (t.created_at >= startedAt && String(t.id) !== String(state.originalTicketId)) {
-          return t.id;
-        }
-      }
-      return null;
-    }).catch(function (err) {
-      logError('List endpoint failed', err);
-      return null;
-    });
-
-    var searchQuery = 'type:ticket requester_id:' + state.requesterId + ' created>' + startedAt;
-    var viaSearch = client.request({
-      url: '/api/v2/search.json?query=' + encodeURIComponent(searchQuery) + '&sort_by=created_at&sort_order=desc&' + cacheBust,
-      type: 'GET'
-    }).then(function (response) {
-      var data = (typeof response === 'string') ? JSON.parse(response) : response;
-      var results = data.results || [];
-      log('[Search] Returned ' + results.length + ' result(s)');
-      for (var i = 0; i < results.length; i++) {
-        var t = results[i];
-        log('[Search] #' + t.id + ' created ' + t.created_at);
-        if (String(t.id) !== String(state.originalTicketId)) {
-          return t.id;
-        }
-      }
-      return null;
-    }).catch(function (err) {
-      logError('Search endpoint failed', err);
-      return null;
-    });
-
-    return Promise.all([viaList, viaSearch]).then(function (results) {
-      return results[0] || results[1] || null;
     });
   }
 
@@ -628,7 +491,7 @@
   }
 
   function getCurrentActiveStep() {
-    for (var i = 1; i <= 5; i++) {
+    for (var i = 1; i <= 4; i++) {
       var step = document.getElementById('step' + i);
       if (step && step.getAttribute('class').indexOf('active') !== -1) return i;
     }
@@ -641,7 +504,6 @@
     setStepState(2, 'pending');
     setStepState(3, 'pending');
     setStepState(4, 'pending');
-    setStepState(5, 'pending');
     resizeApp();
   }
 
