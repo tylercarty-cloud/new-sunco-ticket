@@ -7,6 +7,8 @@
   var REQUEST_TYPE_FIELD_ID = '42571762576276';
   var AUTO_TAGS = ['mccomplete', 'manual_ticket'];
   var REQUEST_TIMEOUT_MS = 30000;
+  var TAG_POLL_INTERVAL_MS = 500;
+  var TAG_POLL_MAX_ATTEMPTS = 60;
 
   var state = {
     requesterName: null,
@@ -200,10 +202,13 @@
 
   // ── Main workflow ──
   //
-  // Ticket-first approach: create the Zendesk ticket via the Tickets API so
-  // that tags (mccomplete, manual_ticket) are present from the very first
-  // trigger evaluation.  Then create the SunCo conversation, send the user
-  // message, and link the conversation back to the ticket.
+  // 1. Create SunCo conversation (proper requester/channel linkage).
+  // 2. Send user message — this triggers the SunCo integration to create a
+  //    Zendesk ticket.  Immediately begin aggressive polling (500ms) so we
+  //    find the ticket as fast as possible.
+  // 3. The instant the ticket is found, fire a tag-only PUT to stamp
+  //    mccomplete + manual_ticket before the response bot can act.
+  // 4. Then do the full update (subject, requester, custom fields).
 
   function createSunCoTicket(subject, message, ticketTitleVal, requestTypeVal) {
     try {
@@ -211,50 +216,62 @@
       showProgress();
       hideStatus();
 
-      var newTicketId;
       var conversationId;
+      var workflowStartedAt = new Date().toISOString();
 
-      log('Step 1: Creating Zendesk ticket with tags');
+      log('Step 1: Creating SunCo conversation for externalId:', state.requesterExternalId);
+      log('Workflow started at:', workflowStartedAt);
       setStepState(1, 'active');
 
-      createZendeskTicket(subject, message, ticketTitleVal, requestTypeVal)
-        .then(function (ticketId) {
-          newTicketId = ticketId;
-          log('Step 1 complete. Ticket #' + newTicketId + ' created with tags:', AUTO_TAGS);
-          setStepState(1, 'done');
-          setStepState(2, 'active');
-          log('Step 2: Creating SunCo conversation for externalId:', state.requesterExternalId);
-          return createSunCoConversation(state.requesterExternalId);
-        })
+      createSunCoConversation(state.requesterExternalId)
         .then(function (convId) {
           conversationId = convId;
-          log('Step 2 complete. Conversation ID:', conversationId);
-          setStepState(2, 'done');
-          setStepState(3, 'active');
-          log('Step 3: Sending user message on conversation');
+          log('Step 1 complete. Conversation ID:', conversationId);
+          setStepState(1, 'done');
+          setStepState(2, 'active');
+          log('Step 2: Sending user message to trigger ticket creation');
           return sendSunCoMessage(conversationId, message, 'user');
         })
         .then(function () {
-          log('Step 3 complete. User message sent.');
-          setStepState(3, 'done');
-          setStepState(4, 'active');
-          log('Step 4: Linking SunCo conversation to ticket #' + newTicketId);
-          return linkConversationToTicket(newTicketId, conversationId);
+          log('Step 2 complete. User message sent.');
+          setStepState(2, 'done');
+          setStepState(3, 'active');
+          log('Step 3: Polling for ticket and applying tags immediately');
+          return pollAndTagTicket(workflowStartedAt);
         })
-        .then(function () {
-          log('Step 4 complete. Conversation linked.');
-          setStepState(4, 'done');
+        .then(function (ticketId) {
+          log('Step 3 complete. Ticket #' + ticketId + ' found and tagged.');
+          setStepState(3, 'done');
 
-          showStatus(
-            'success',
-            'Ticket <a href="#" id="openTicketLink">#' + newTicketId + '</a> created with tags and linked to Sunshine Conversation.'
-          );
-          var link = document.getElementById('openTicketLink');
-          if (link) {
-            link.addEventListener('click', function (ev) {
-              ev.preventDefault();
-              client.invoke('routeTo', 'ticket', newTicketId);
+          if (ticketId) {
+            setStepState(4, 'active');
+            log('Step 4: Updating ticket with subject, custom fields, and conversation ID');
+            return updateTicketFields(ticketId, subject, ticketTitleVal, requestTypeVal, conversationId).then(function () {
+              log('Step 4 complete.');
+              setStepState(4, 'done');
+              return ticketId;
             });
+          }
+          return ticketId;
+        })
+        .then(function (ticketId) {
+          if (ticketId) {
+            showStatus(
+              'success',
+              'Ticket <a href="#" id="openTicketLink">#' + ticketId + '</a> created via Sunshine Conversations.'
+            );
+            var link = document.getElementById('openTicketLink');
+            if (link) {
+              link.addEventListener('click', function (ev) {
+                ev.preventDefault();
+                client.invoke('routeTo', 'ticket', ticketId);
+              });
+            }
+          } else {
+            showStatus(
+              'success',
+              'Conversation created and message sent. The ticket should appear shortly in your queue.'
+            );
           }
 
           ticketSubject.value = '';
@@ -275,92 +292,6 @@
       showStatus('error', 'JavaScript error: ' + syncError.message);
       setFormEnabled(true);
     }
-  }
-
-  // ── Zendesk API ──
-
-  function createZendeskTicket(subject, message, ticketTitleVal, requestTypeVal) {
-    var customFields = buildCustomFields(ticketTitleVal, requestTypeVal, null);
-
-    var ticketData = {
-      ticket: {
-        requester_id: state.requesterId,
-        subject: subject,
-        tags: AUTO_TAGS,
-        comment: { body: message, public: true },
-        custom_fields: customFields
-      }
-    };
-
-    log('Creating ticket with payload:', JSON.stringify(ticketData, null, 2));
-
-    return client.request({
-      url: '/api/v2/tickets.json',
-      type: 'POST',
-      contentType: 'application/json',
-      data: JSON.stringify(ticketData)
-    }).then(function (response) {
-      var data = (typeof response === 'string') ? JSON.parse(response) : response;
-      if (data.ticket && data.ticket.id) {
-        log('Ticket created: #' + data.ticket.id);
-        return data.ticket.id;
-      }
-      throw new Error('No ticket ID in response: ' + JSON.stringify(data));
-    }).catch(function (err) {
-      logError('Failed to create ticket', err);
-      throw err;
-    });
-  }
-
-  function linkConversationToTicket(ticketId, conversationId) {
-    var updateData = {
-      ticket: {
-        custom_fields: [
-          { id: Number(SUNCO_CONVERSATION_FIELD_ID), value: conversationId }
-        ]
-      }
-    };
-
-    log('Linking conversation ' + conversationId + ' to ticket #' + ticketId);
-
-    return client.request({
-      url: '/api/v2/tickets/' + ticketId + '.json',
-      type: 'PUT',
-      contentType: 'application/json',
-      data: JSON.stringify(updateData)
-    }).then(function (response) {
-      log('Conversation linked to ticket', response);
-      return response;
-    }).catch(function (err) {
-      logError('Failed to link conversation to ticket', err);
-      throw err;
-    });
-  }
-
-  function buildCustomFields(ticketTitleVal, requestTypeVal, conversationId) {
-    var fieldsMap = {};
-
-    state.originalCustomFields.forEach(function (f) {
-      fieldsMap[String(f.id)] = f.value;
-    });
-
-    if (ticketTitleVal) {
-      fieldsMap[TICKET_TITLE_FIELD_ID] = ticketTitleVal;
-    }
-    if (requestTypeVal) {
-      fieldsMap[REQUEST_TYPE_FIELD_ID] = requestTypeVal;
-    }
-    if (conversationId) {
-      fieldsMap[SUNCO_CONVERSATION_FIELD_ID] = conversationId;
-    }
-
-    var result = [];
-    Object.keys(fieldsMap).forEach(function (id) {
-      result.push({ id: Number(id), value: fieldsMap[id] });
-    });
-
-    log('Built custom fields (' + result.length + ' fields)', JSON.stringify(result, null, 2));
-    return result;
   }
 
   // ── SunCo API ──
@@ -400,7 +331,8 @@
     var path = '/v2/apps/' + state.suncoAppId + '/conversations';
     return makeSunCoRequest(path, {
       type: 'personal',
-      participants: [{ userExternalId: externalId }]
+      participants: [{ userExternalId: externalId }],
+      metadata: { stop_ai_escalated: true }
     }).then(function (response) {
       var data = (typeof response === 'string') ? JSON.parse(response) : response;
       log('Parsed conversation response', data);
@@ -420,6 +352,178 @@
     return makeSunCoRequest(path, {
       author: author,
       content: { type: 'text', text: messageText }
+    });
+  }
+
+  // ── Zendesk API ──
+
+  function applyTagsToTicket(ticketId) {
+    log('Applying tags to ticket #' + ticketId + ':', AUTO_TAGS);
+    return client.request({
+      url: '/api/v2/tickets/' + ticketId + '.json',
+      type: 'PUT',
+      contentType: 'application/json',
+      data: JSON.stringify({ ticket: { tags: AUTO_TAGS } })
+    }).then(function (response) {
+      log('Tags applied to ticket #' + ticketId);
+      return response;
+    }).catch(function (err) {
+      logError('Failed to apply tags to ticket #' + ticketId, err);
+      throw err;
+    });
+  }
+
+  function updateTicketFields(ticketId, subject, ticketTitleVal, requestTypeVal, conversationId) {
+    var customFields = buildCustomFields(ticketTitleVal, requestTypeVal, conversationId);
+
+    var updateData = {
+      ticket: {
+        requester_id: state.requesterId,
+        subject: subject,
+        tags: AUTO_TAGS,
+        custom_fields: customFields
+      }
+    };
+
+    log('Updating ticket #' + ticketId + ' with payload:', JSON.stringify(updateData, null, 2));
+
+    return client.request({
+      url: '/api/v2/tickets/' + ticketId + '.json',
+      type: 'PUT',
+      contentType: 'application/json',
+      data: JSON.stringify(updateData)
+    }).then(function (response) {
+      log('Ticket updated successfully', response);
+      return response;
+    }).catch(function (err) {
+      logError('Failed to update ticket', err);
+      throw err;
+    });
+  }
+
+  function buildCustomFields(ticketTitleVal, requestTypeVal, conversationId) {
+    var fieldsMap = {};
+
+    state.originalCustomFields.forEach(function (f) {
+      fieldsMap[String(f.id)] = f.value;
+    });
+
+    if (ticketTitleVal) {
+      fieldsMap[TICKET_TITLE_FIELD_ID] = ticketTitleVal;
+    }
+    if (requestTypeVal) {
+      fieldsMap[REQUEST_TYPE_FIELD_ID] = requestTypeVal;
+    }
+    if (conversationId) {
+      fieldsMap[SUNCO_CONVERSATION_FIELD_ID] = conversationId;
+    }
+
+    var result = [];
+    Object.keys(fieldsMap).forEach(function (id) {
+      result.push({ id: Number(id), value: fieldsMap[id] });
+    });
+
+    log('Built custom fields (' + result.length + ' fields)', JSON.stringify(result, null, 2));
+    return result;
+  }
+
+  // ── Polling ──
+  //
+  // Aggressive polling: start immediately after the message is sent, check
+  // every 500ms.  The moment a new ticket is found, fire a tag-only PUT
+  // before returning the ticket ID so tags land as fast as possible.
+
+  function pollAndTagTicket(startedAt) {
+    log('Aggressive poll: looking for ticket by requester ' + state.requesterId + ' created after ' + startedAt);
+    var attempts = 0;
+
+    return new Promise(function (resolve, reject) {
+      function check() {
+        attempts++;
+        log('Tag-poll attempt ' + attempts + ' of ' + TAG_POLL_MAX_ATTEMPTS);
+
+        findNewestTicket(startedAt)
+          .then(function (ticketId) {
+            if (ticketId) {
+              log('Found ticket #' + ticketId + ' on attempt ' + attempts + ', applying tags now');
+              return applyTagsToTicket(ticketId).then(function () {
+                resolve(ticketId);
+              });
+            }
+            if (attempts >= TAG_POLL_MAX_ATTEMPTS) {
+              log('Max poll attempts reached, no ticket found');
+              resolve(null);
+              return;
+            }
+            setTimeout(check, TAG_POLL_INTERVAL_MS);
+          })
+          .catch(function (err) {
+            logError('Error during tag-poll', err);
+            if (attempts >= TAG_POLL_MAX_ATTEMPTS) {
+              resolve(null);
+            } else {
+              setTimeout(check, TAG_POLL_INTERVAL_MS);
+            }
+          });
+      }
+
+      check();
+    });
+  }
+
+  function isNewTicket(ticket, startedAt) {
+    if (!ticket || !ticket.created_at) return false;
+    if (ticket.created_at < startedAt) return false;
+    if (state.originalTicketId && String(ticket.id) === String(state.originalTicketId)) return false;
+    return true;
+  }
+
+  function findNewestTicket(startedAt) {
+    var cacheBust = '_=' + Date.now();
+
+    var viaList = client.request({
+      url: '/api/v2/users/' + state.requesterId + '/tickets/requested.json?sort_by=created_at&sort_order=desc&per_page=5&' + cacheBust,
+      type: 'GET'
+    }).then(function (response) {
+      var data = (typeof response === 'string') ? JSON.parse(response) : response;
+      var tickets = data.tickets || [];
+      log('[List] Returned ' + tickets.length + ' ticket(s)');
+      for (var i = 0; i < tickets.length; i++) {
+        var t = tickets[i];
+        log('[List] #' + t.id + ' created ' + t.created_at);
+        if (isNewTicket(t, startedAt)) {
+          return t.id;
+        }
+      }
+      return null;
+    }).catch(function (err) {
+      logError('List endpoint failed', err);
+      return null;
+    });
+
+    var searchQuery = 'type:ticket requester_id:' + state.requesterId + ' created>' + startedAt;
+    var viaSearch = client.request({
+      url: '/api/v2/search.json?query=' + encodeURIComponent(searchQuery) + '&sort_by=created_at&sort_order=desc&' + cacheBust,
+      type: 'GET'
+    }).then(function (response) {
+      var data = (typeof response === 'string') ? JSON.parse(response) : response;
+      var results = data.results || [];
+      log('[Search] Returned ' + results.length + ' result(s)');
+      for (var i = 0; i < results.length; i++) {
+        var t = results[i];
+        log('[Search] #' + t.id + ' created ' + t.created_at);
+        if (isNewTicket(t, startedAt)) {
+          return t.id;
+        }
+      }
+      return null;
+    }).catch(function (err) {
+      logError('Search endpoint failed', err);
+      return null;
+    });
+
+    return Promise.all([viaList, viaSearch]).then(function (results) {
+      return results[0] || results[1] || null;
     });
   }
 
